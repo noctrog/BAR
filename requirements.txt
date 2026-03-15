@@ -16,3 +16,5 @@ webdataset
 xformers
 flash-attn>=2.0.0  # Optional: For FlashAttention2/3 support (requires CUDA and compilation)
 bitsandbytes
+tensorflow-cpu
+tensorflow-datasets

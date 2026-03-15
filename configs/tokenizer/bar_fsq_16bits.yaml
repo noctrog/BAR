@@ -36,6 +36,7 @@ losses:
 
 dataset:
   params:
+    tfds_data_dir: ""  # Set to tfds data_dir to use tfds instead of webdataset
     train_shards_path_or_url: /path/to/imagenet-train-{000000..000320}.tar
     eval_shards_path_or_url: /path/to/imagenet-val-{000000..000049}.tar
     num_workers_per_gpu: 16

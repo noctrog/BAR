@@ -8,7 +8,7 @@ import pprint
 import functools
 from collections import defaultdict
 
-from data import SimpleImageDataset, CachedTokensFolder
+from data import SimpleImageDataset, CachedTokensFolder, TfdsImageDataset
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -278,19 +278,32 @@ def create_dataloader(config, logger, accelerator):
     preproc_config = config.dataset.preprocessing
     dataset_config = config.dataset.params
 
-    dataset = SimpleImageDataset(
-        train_shards_path=dataset_config.train_shards_path_or_url,
-        eval_shards_path=dataset_config.eval_shards_path_or_url,
-        num_train_examples=config.experiment.max_train_examples,
-        per_gpu_batch_size=config.training.per_gpu_batch_size,
-        global_batch_size=total_batch_size_without_accum,
-        num_workers_per_gpu=dataset_config.num_workers_per_gpu,
-        resize_shorter_edge=preproc_config.resize_shorter_edge,
-        crop_size=preproc_config.crop_size,
-        random_crop=preproc_config.random_crop,
-        random_flip=preproc_config.random_flip,
-        dataset_with_class_label=dataset_config.get("dataset_with_class_label", True)
-    )
+    if dataset_config.get("tfds_data_dir", ""):
+        dataset = TfdsImageDataset(
+            tfds_data_dir=dataset_config.tfds_data_dir,
+            num_train_examples=config.experiment.max_train_examples,
+            per_gpu_batch_size=config.training.per_gpu_batch_size,
+            global_batch_size=total_batch_size_without_accum,
+            num_workers_per_gpu=dataset_config.num_workers_per_gpu,
+            resize_shorter_edge=preproc_config.resize_shorter_edge,
+            crop_size=preproc_config.crop_size,
+            random_crop=preproc_config.random_crop,
+            random_flip=preproc_config.random_flip,
+        )
+    else:
+        dataset = SimpleImageDataset(
+            train_shards_path=dataset_config.train_shards_path_or_url,
+            eval_shards_path=dataset_config.eval_shards_path_or_url,
+            num_train_examples=config.experiment.max_train_examples,
+            per_gpu_batch_size=config.training.per_gpu_batch_size,
+            global_batch_size=total_batch_size_without_accum,
+            num_workers_per_gpu=dataset_config.num_workers_per_gpu,
+            resize_shorter_edge=preproc_config.resize_shorter_edge,
+            crop_size=preproc_config.crop_size,
+            random_crop=preproc_config.random_crop,
+            random_flip=preproc_config.random_flip,
+            dataset_with_class_label=dataset_config.get("dataset_with_class_label", True)
+        )
     train_dataloader, eval_dataloader = dataset.train_dataloader, dataset.eval_dataloader
     # Mark that this dataloader is WebDataset-based and handles distributed training internally
     train_dataloader.is_webdataset = True

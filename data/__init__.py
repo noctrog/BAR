@@ -1,1 +1,2 @@
 from .webdataset_reader import SimpleImageDataset, CachedTokensFolder
+from .tfds_reader import TfdsImageDataset
