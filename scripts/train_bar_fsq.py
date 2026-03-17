@@ -156,8 +156,15 @@ def main():
         # Get the wandb run ID for saving in checkpoints
         if config.training.enable_wandb:
             wandb_tracker = accelerator.get_tracker("wandb")
-            wandb_run_id = wandb_tracker.run.id
-            logger.info(f"Wandb run ID: {wandb_run_id}")
+            if hasattr(wandb_tracker, 'run') and wandb_tracker.run is not None:
+                wandb_run_id = wandb_tracker.run.id
+            elif hasattr(wandb_tracker, 'tracker') and hasattr(wandb_tracker.tracker, 'id'):
+                wandb_run_id = wandb_tracker.tracker.id
+            else:
+                logger.warning("Could not get wandb run ID from tracker, wandb may not be installed")
+                wandb_run_id = None
+            if wandb_run_id:
+                logger.info(f"Wandb run ID: {wandb_run_id}")
 
         config_path = Path(output_dir) / "config.yaml"
         logger.info(f"Saving config to {config_path}")

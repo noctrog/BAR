@@ -36,10 +36,10 @@ losses:
 
 dataset:
   params:
-    tfds_data_dir: ""
-    train_shards_path_or_url: /path/to/imagenet-train-{000000..000320}.tar
-    eval_shards_path_or_url: /path/to/imagenet-val-{000000..000049}.tar
-    num_workers_per_gpu: 16
+    tfds_data_dir: /home/calvogon/tensorflow_datasets
+    train_shards_path_or_url: ""
+    eval_shards_path_or_url: ""
+    num_workers_per_gpu: 8
   preprocessing:
     resize_shorter_edge: 256
     crop_size: 256
@@ -65,7 +65,7 @@ lr_scheduler:
 training:
   compile_model: true
   gradient_accumulation_steps: 1
-  per_gpu_batch_size: 32
+  per_gpu_batch_size: 8
   mixed_precision: bf16
   enable_tf32: true
   use_ema: true
