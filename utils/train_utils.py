@@ -16,8 +16,8 @@ from torch.utils.data import DataLoader
 from omegaconf import OmegaConf
 from torch.optim import AdamW
 from utils.lr_schedulers import get_scheduler
-from modeling.modules import EMAModel, ReconstructionLoss
-from modeling.tokenizer import BAR_FSQ
+from modeling.modules import EMAModel, ReconstructionLoss, DINOReconstructionLoss
+from modeling.tokenizer import BAR_FSQ, DINO_FSQ
 from modeling.generator import BAR
 from evaluator import VQGANEvaluator
 
@@ -102,8 +102,16 @@ def create_model_and_loss_module(config, logger, accelerator,
     """Creates BAR_FSQ tokenizer model or BAR generator model and loss module."""
     logger.info("Creating model and loss module.")
     if model_type == "tokenizer":
-        model_cls = BAR_FSQ
-        loss_cls = ReconstructionLoss
+        reconstruction_target = config.model.vq_model.get("reconstruction_target", None)
+        if reconstruction_target is not None:
+            model_cls = DINO_FSQ
+            if reconstruction_target == "dino":
+                loss_cls = DINOReconstructionLoss
+            else:
+                loss_cls = ReconstructionLoss
+        else:
+            model_cls = BAR_FSQ
+            loss_cls = ReconstructionLoss
     elif model_type == "generator":
         model_cls = BAR
         loss_cls = None # but we will not use
@@ -145,7 +153,7 @@ def create_model_and_loss_module(config, logger, accelerator,
         logger.info(f"Total parameters: {total_params:,}")
         logger.info(f"Trainable parameters: {trainable_params:,}")
 
-        if model_type == "tokenizer" and loss_module.discriminator is not None:
+        if model_type == "tokenizer" and hasattr(loss_module, 'discriminator') and loss_module.discriminator is not None:
             disc_params = sum(p.numel() for p in loss_module.discriminator.parameters())
             logger.info(f"Discriminator parameters: {disc_params:,}")
         logger.info("=" * 80)
@@ -851,6 +859,10 @@ def eval_reconstruction(
     accelerator,
     evaluator,
 ):
+    reconstruction_target = getattr(accelerator.unwrap_model(model), 'reconstruction_target', 'rgb')
+    if reconstruction_target != 'rgb':
+        return {}
+
     model.eval()
     evaluator.reset_metrics()
     local_model = accelerator.unwrap_model(model)
@@ -900,6 +912,11 @@ def eval_reconstruction(
 @torch._dynamo.disable
 def reconstruct_images(model, original_images, fnames, accelerator,
                     global_step, output_dir, logger, config=None, text=None):
+    reconstruction_target = getattr(accelerator.unwrap_model(model), 'reconstruction_target', 'rgb')
+    if reconstruction_target != 'rgb':
+        logger.info("Skipping image visualization for non-RGB target")
+        return
+
     logger.info("Reconstructing images...")
     original_images = torch.clone(original_images)
     model.eval()

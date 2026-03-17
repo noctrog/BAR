@@ -5,7 +5,7 @@ from omegaconf import OmegaConf
 from pathlib import Path
 
 from .modules import BaseModel, SigLIP2Encoder, SigLIP2Decoder
-from .modules.blocks import RMSNorm
+from .modules.blocks import RMSNorm, DINOv2Encoder, DINODecoder
 from .quantizer import FSQ
 
 
@@ -120,3 +120,44 @@ class BAR_FSQ(BaseModel):
         decoded, clip_pred = self.decode(z_quantized)
         result_dict["clip_pred"] = clip_pred
         return decoded, result_dict
+
+
+class DINO_FSQ(BAR_FSQ):
+    """DINO-based tokenizer with FSQ quantization.
+
+    Uses a frozen DINOv2 ViT-B/14 encoder and supports two reconstruction modes:
+    - 'rgb': decode DINO features back to RGB images
+    - 'dino': decode DINO features back to DINO features
+    Controlled by config.model.vq_model.reconstruction_target.
+    """
+    def __init__(self, config):
+        if isinstance(config, dict):
+            config = OmegaConf.create(config)
+
+        # Skip BAR_FSQ.__init__, call BaseModel directly
+        BaseModel.__init__(self)
+        self.config = config
+        self.reconstruction_target = config.model.vq_model.get("reconstruction_target", "rgb")
+
+        # Initialize decoder first, then apply weight initialization
+        self.decoder = DINODecoder(config)
+        self.apply(self._init_weights)
+
+        # Load frozen encoder after weight initialization
+        self.encoder = DINOv2Encoder(config)
+
+        # FSQ quantizer: 768 (DINOv2) -> token_size -> 1024 (decoder)
+        self.quantize = FSQ(
+            in_channel=self.encoder.width,
+            out_channel=self.decoder.width,
+            token_size=config.model.vq_model.token_size,
+            config=config,
+        )
+
+    def encode(self, x):
+        features = self.encoder(pixel_values=x)
+        z_quantized, result_dict = self.quantize(features)
+        result_dict["clip_gt"] = features
+        if self.reconstruction_target == "dino":
+            result_dict["dino_gt"] = features
+        return z_quantized, result_dict

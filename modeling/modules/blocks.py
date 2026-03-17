@@ -374,17 +374,51 @@ class SigLIP2Encoder(nn.Module):
             return trainable_features
 
 
-class SigLIP2Decoder(nn.Module):
-    """
-    Decoder that works with SigLIP2Encoder outputs.
-    Reconstructs from 2D tokens (grid_size^2 image tokens).
+class DINOv2Encoder(nn.Module):
+    """Frozen DINOv2 ViT-B/14 feature extractor.
 
-    Features:
-    - Learnable positional embeddings
-    - LayerNorm and standard MLP
-    - CLIP alignment for distillation
+    Extracts patch tokens from images using a frozen DINOv2 backbone.
+    For 256x256 images with patch_size=14: grid_size=18, producing 324 patches of dim 768.
     """
     def __init__(self, config):
+        super().__init__()
+        self.image_size = config.dataset.preprocessing.crop_size
+        self.dinov2 = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
+        self.dinov2.eval()
+        self.dinov2.requires_grad_(False)
+        self.width = 768
+        self.patch_size = 14
+        self.grid_size = self.image_size // self.patch_size
+
+        self.aligned_size = self.grid_size * self.patch_size
+
+        self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+        self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
+
+    def forward(self, pixel_values):
+        """Extract DINOv2 patch features.
+
+        Args:
+            pixel_values: (B, 3, H, W) in [-1, 1]
+
+        Returns:
+            patch_tokens: (B, grid_size^2, 768)
+        """
+        x = (pixel_values + 1.0) / 2.0
+        x = (x - self.mean) / self.std
+        if x.shape[-1] != self.aligned_size or x.shape[-2] != self.aligned_size:
+            x = F.interpolate(x, size=(self.aligned_size, self.aligned_size), mode='bilinear', align_corners=False)
+        with torch.no_grad():
+            return self.dinov2.get_intermediate_layers(x, n=1)[0]
+
+
+class SigLIP2Decoder(nn.Module):
+    """ViT-L decoder with CLIP alignment and RGB output.
+
+    Used by BAR_FSQ (SigLIP2 encoder, target_width=1152) and subclassed
+    by DINODecoder (DINOv2 encoder, target_width=768, optional DINO output).
+    """
+    def __init__(self, config, target_width=1152):
         super().__init__()
         self.config = config
         self.image_size = config.dataset.preprocessing.crop_size
@@ -397,7 +431,6 @@ class SigLIP2Decoder(nn.Module):
         self.num_heads = 16
         self.mlp_ratio = 4.0
 
-        # Always use LayerNorm and standard MLP
         norm_layer = nn.LayerNorm
 
         scale = self.width ** -0.5
@@ -419,12 +452,9 @@ class SigLIP2Decoder(nn.Module):
                 attn_drop=0.,
                 norm_layer=norm_layer,
                 use_swiglu=False,
-                use_adaln=False,  # No AdaLN for decoder
+                use_adaln=False,
             ))
         self.ln_post = norm_layer(self.width)
-
-        # CLIP target width (always 1152 for so400m)
-        target_width = 1152
 
         # RGB reconstruction
         self.ffn = nn.Sequential(
@@ -446,30 +476,21 @@ class SigLIP2Decoder(nn.Module):
             nn.Linear(2048, target_width),
         ) if self.clip_align else None
 
-        # Potentially use checkpointing
         self.use_checkpoint = config.model.vq_model.get("use_checkpoint", False)
         self.attn_mask = None
 
-    def forward(self, z_quantized):
-        """
-        Args:
-            z_quantized: 2D tokens (B, grid_size^2, C)
-
-        Returns:
-            (reconstructed_image, clip_pred) where image is (B, 3, H, W)
-        """
+    def _transformer_forward(self, z_quantized):
+        """Shared transformer forward pass. Returns (patch_tokens, clip_pred)."""
         clip_pred = None
         x = z_quantized
-        batchsize, seq_len, _ = x.shape
+        batchsize = x.shape[0]
 
-        # Add class embedding and positional encoding
-        x = torch.cat([_expand_token(self.class_embedding, x.shape[0]).to(x.dtype), x], dim=1)
+        x = torch.cat([_expand_token(self.class_embedding, batchsize).to(x.dtype), x], dim=1)
         x = x + self.positional_embedding.to(x.dtype)
 
         attn_mask = self.attn_mask
         x = self.ln_pre(x)
 
-        # Forward through transformer layers
         for i in range(self.num_layers):
             if self.use_checkpoint:
                 x = torch.utils.checkpoint.checkpoint(
@@ -480,12 +501,62 @@ class SigLIP2Decoder(nn.Module):
             if self.clip_align and i == self.clip_align_layer_id:
                 clip_pred = self.clip_projector(x)[:, 1:1+self.grid_size**2]
 
-        # Extract image tokens (remove cls embedding)
         x = x[:, 1:1+self.grid_size**2]
         x = self.ln_post(x)
+        return x, clip_pred, batchsize
 
-        # Reconstruct RGB image
+    def _to_rgb(self, x, batchsize):
+        """Convert patch tokens to RGB image."""
         x = x.permute(0, 2, 1).reshape(batchsize, self.width, self.grid_size, self.grid_size)
         x = self.ffn(x.contiguous())
         x = self.conv_out(x)
+        return x
+
+    def forward(self, z_quantized):
+        """
+        Args:
+            z_quantized: (B, grid_size^2, C)
+        Returns:
+            (reconstructed_image (B, 3, H, W), clip_pred)
+        """
+        x, clip_pred, batchsize = self._transformer_forward(z_quantized)
+        return self._to_rgb(x, batchsize), clip_pred
+
+
+class DINODecoder(SigLIP2Decoder):
+    """Decoder for DINO_FSQ. Extends SigLIP2Decoder with optional DINO feature output.
+
+    When reconstruction_target='rgb': outputs RGB image (with optional upsample for non-aligned grids).
+    When reconstruction_target='dino': outputs DINO features (B, N, 768) via linear projection.
+    """
+    def __init__(self, config):
+        self.reconstruction_target = config.model.vq_model.get("reconstruction_target", "rgb")
+        self.encoder_width = 768  # DINOv2 ViT-B/14
+        super().__init__(config, target_width=self.encoder_width)
+
+        if self.reconstruction_target == "rgb":
+            self.needs_upsample = (self.grid_size * self.patch_size) != self.image_size
+        else:  # dino — replace RGB head with linear projection
+            del self.ffn
+            del self.conv_out
+            self.dino_proj = nn.Linear(self.width, self.encoder_width)
+
+    def forward(self, z_quantized):
+        """
+        Args:
+            z_quantized: (B, grid_size^2, decoder_width)
+        Returns:
+            For rgb: (B, 3, image_size, image_size), clip_pred
+            For dino: (B, grid_size^2, 768), clip_pred
+        """
+        x, clip_pred, batchsize = self._transformer_forward(z_quantized)
+
+        if self.reconstruction_target == "rgb":
+            x = self._to_rgb(x, batchsize)
+            if self.needs_upsample:
+                x = F.interpolate(x, size=(self.image_size, self.image_size),
+                                  mode='bilinear', align_corners=False)
+        else:
+            x = self.dino_proj(x)
+
         return x, clip_pred

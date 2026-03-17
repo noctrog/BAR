@@ -284,3 +284,41 @@ class ReconstructionLoss(torch.nn.Module):
             logits_fake=logits_fake.detach().mean(),
         )
         return discriminator_loss, loss_dict
+
+
+class DINOReconstructionLoss(torch.nn.Module):
+    """MSE-only loss for DINO→DINO feature reconstruction."""
+    def __init__(self, config):
+        super().__init__()
+        self.reconstruction_weight = config.losses.get("reconstruction_weight_mse", 1.0)
+        self.use_discriminator = False
+        self.discriminator = None
+        self.register_buffer('zero', torch.zeros(()))
+
+    def should_discriminator_be_trained(self, global_step):
+        return False
+
+    def forward(self, inputs, reconstructions, extra_result_dict, global_step, mode="generator"):
+        if mode == "discriminator":
+            return self.zero, dict(
+                discriminator_loss=self.zero,
+                logits_real=self.zero,
+                logits_fake=self.zero,
+            )
+
+        dino_gt = extra_result_dict["dino_gt"]
+        mse_loss = F.mse_loss(reconstructions, dino_gt, reduction="mean")
+        total_loss = self.reconstruction_weight * mse_loss
+
+        loss_dict = dict(
+            total_loss=total_loss.detach(),
+            reconstruction_loss=total_loss.detach(),
+            perceptual_loss=self.zero,
+            weighted_gan_loss=self.zero,
+            discriminator_factor=0.,
+            clip_loss=self.zero,
+            gram_loss=self.zero,
+            d_weight=0.,
+            gan_loss=self.zero,
+        )
+        return total_loss, loss_dict
